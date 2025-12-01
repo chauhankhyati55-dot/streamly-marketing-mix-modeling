@@ -1,7 +1,7 @@
-# streamly-marketing-mix-modeling
-Marketing Mix Modeling (MMM) project for Streamly+, a fictional streaming service. Includes 2 years of simulated weekly marketing data, adstock and saturation transformations, incremental channel impact analysis, marginal ROI estimation, and budget optimization using R.
+
 
 # Streamly+ Marketing Mix Modeling (MMM) Project – R Implementation
+Marketing Mix Modeling (MMM) project for Streamly+, a fictional streaming service. Includes 2 years of simulated weekly marketing data, adstock and saturation transformations, incremental channel impact analysis, marginal ROI estimation, and budget optimization using R.
 
 This repo contains a realistic end-to-end Marketing Mix Modeling project for a fictional subscription video streaming service, **Streamly+**.
 
