@@ -1,0 +1,246 @@
+---
+title: "mmm_model"
+author: "Khyati_Chauhan"
+date: "2025-12-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+.libPaths("C:/Rlibs")
+
+library(lubridate)
+library(dplyr)
+
+.libPaths("C:/Rlibs")
+
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(lubridate)
+```
+
+
+```{r}
+# 1. Load data
+df <- read_csv("data/mmm_streamly.csv",
+               col_types = cols(
+                 week = col_date()
+               ))
+
+glimpse(df)
+
+# Set index-like ordering
+df <- df %>% arrange(week)
+
+# 2. Quick EDA -------------------------------------------------------------
+
+# Plot subscriptions over time
+ggplot(df, aes(x = week, y = subs_new)) +
+  geom_line() +
+  labs(title = "Weekly New Subscriptions", x = "Week", y = "New Subs")
+
+# Plot channel spends
+channel_vars <- c("spend_meta", "spend_search", "spend_youtube", "spend_display", "spend_email")
+
+for (ch in channel_vars) {
+  print(
+    ggplot(df, aes(x = week, y = .data[[ch]])) +
+      geom_line() +
+      labs(title = ch, x = "Week", y = "Spend")
+  )
+}
+
+summary(df)
+
+```
+
+```{r}
+###Recreate Adstock & Saturation for Modeling
+# Adstock function (same as in generation)
+adstock <- function(x, rate = 0.5) {
+  result <- numeric(length(x))
+  for (i in seq_along(x)) {
+    if (i == 1) {
+      result[i] <- x[i]
+    } else {
+      result[i] <- x[i] + rate * result[i - 1]
+    }
+  }
+  result
+}
+
+saturate <- function(x, scale) {
+  log1p(x / scale)
+}
+
+df <- df %>%
+  arrange(week) %>%
+  mutate(
+    meta_adstock    = adstock(spend_meta,    rate = 0.6),
+    search_adstock  = adstock(spend_search,  rate = 0.5),
+    youtube_adstock = adstock(spend_youtube, rate = 0.5),
+    display_adstock = adstock(spend_display, rate = 0.4),
+    email_adstock   = adstock(spend_email,   rate = 0.3),
+    meta_sat    = saturate(meta_adstock,    scale = 80000),
+    search_sat  = saturate(search_adstock,  scale = 60000),
+    youtube_sat = saturate(youtube_adstock, scale = 50000),
+    display_sat = saturate(display_adstock, scale = 30000),
+    email_sat   = saturate(email_adstock,   scale = 10000)
+  )
+
+# Target: log(subs_new)
+df <- df %>%
+  mutate(log_subs = log(pmax(subs_new, 1)))
+
+```
+
+```{r}
+###Fit the MMM Regression
+mmm_formula <- log_subs ~ meta_sat + search_sat + youtube_sat +
+  display_sat + email_sat +
+  seasonality_index + competitor_index + promo_flag
+
+mmm_model <- lm(mmm_formula, data = df)
+
+summary(mmm_model)
+##tidy(mmm_model)
+
+```
+```{r}
+### Channel Contribution Decomposition
+# Get model matrix (includes intercept)
+X <- model.matrix(mmm_model)
+coefs <- coef(mmm_model)
+
+# Contribution per term = beta * x
+# Skip the intercept ("(Intercept)")
+term_names <- names(coefs)
+term_names <- term_names[term_names != "(Intercept)"]
+
+contrib_df <- as.data.frame(X)
+for (term in term_names) {
+  contrib_df[[paste0("contrib_", term)]] <- coefs[term] * contrib_df[[term]]
+}
+
+# Sum contributions over time for media terms
+media_terms <- c("meta_sat", "search_sat", "youtube_sat", "display_sat", "email_sat")
+
+channel_contribs <- sapply(media_terms, function(term) {
+  sum(contrib_df[[paste0("contrib_", term)]])
+})
+
+channel_contribs
+
+total_media_contrib <- sum(channel_contribs)
+channel_share <- channel_contribs / total_media_contrib
+channel_share
+
+```
+```{r}
+channel_share_df <- data.frame(
+  channel = media_terms,
+  share = as.numeric(channel_share)
+)
+
+ggplot(channel_share_df, aes(x = channel, y = share)) +
+  geom_col() +
+  labs(
+    title = "Channel Contribution Share (Media-Driven)",
+    x = "Channel",
+    y = "Share of Media Effect"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+
+###Simple Marginal ROI Approximation
+##Take average spend for each channel.Increase one channel by +1% and approximate how many extra subs we’d get.
+
+avg_spend <- df %>%
+  summarise(
+    meta    = mean(spend_meta),
+    search  = mean(spend_search),
+    youtube = mean(spend_youtube),
+    display = mean(spend_display),
+    email   = mean(spend_email)
+  ) %>%
+  as.list()
+
+avg_spend
+
+```
+```{r}
+### Pick a representative week (e.g., middle)
+rep_idx  <- round(nrow(df) / 2)
+rep_week <- df[rep_idx, ]
+rep_week
+
+###Define a helper to predict log_subs given hypothetical spends
+
+predict_log_subs_given_spend <- function(spends, row_df, model_coefs) {
+  # Approximate adstock as proportional to spend
+  meta_adstock    <- spends$meta    * (row_df$meta_adstock    / row_df$spend_meta)
+  search_adstock  <- spends$search  * (row_df$search_adstock  / row_df$spend_search)
+  youtube_adstock <- spends$youtube * (row_df$youtube_adstock / row_df$spend_youtube)
+  display_adstock <- spends$display * (row_df$display_adstock / row_df$spend_display)
+  email_adstock   <- spends$email   * (row_df$email_adstock   / row_df$spend_email)
+
+  meta_sat    <- saturate(meta_adstock,    scale = 80000)
+  search_sat  <- saturate(search_adstock,  scale = 60000)
+  youtube_sat <- saturate(youtube_adstock, scale = 50000)
+  display_sat <- saturate(display_adstock, scale = 30000)
+  email_sat   <- saturate(email_adstock,   scale = 10000)
+
+  x_vec <- c(
+    `(Intercept)`      = 1,
+    meta_sat           = meta_sat,
+    search_sat         = search_sat,
+    youtube_sat        = youtube_sat,
+    display_sat        = display_sat,
+    email_sat          = email_sat,
+    seasonality_index  = row_df$seasonality_index,
+    competitor_index   = row_df$competitor_index,
+    promo_flag         = row_df$promo_flag
+  )
+
+  sum(model_coefs[names(x_vec)] * x_vec)
+}
+
+model_coefs <- coef(mmm_model)
+
+marginal_roi_for_channel <- function(channel_name, delta_pct = 0.01) {
+  current_spends <- avg_spend
+
+  base_log <- predict_log_subs_given_spend(current_spends, rep_week, model_coefs)
+  base_subs <- exp(base_log)
+
+  new_spends <- current_spends
+  new_spends[[channel_name]] <- new_spends[[channel_name]] * (1 + delta_pct)
+
+  new_log <- predict_log_subs_given_spend(new_spends, rep_week, model_coefs)
+  new_subs <- exp(new_log)
+
+  incr_subs  <- new_subs - base_subs
+  incr_spend <- new_spends[[channel_name]] - current_spends[[channel_name]]
+  mroas      <- incr_subs / incr_spend
+
+  list(
+    channel    = channel_name,
+    incr_subs  = incr_subs,
+    incr_spend = incr_spend,
+    mroas      = mroas
+  )
+}
+
+channels <- names(avg_spend)
+mroas_list <- lapply(channels, marginal_roi_for_channel)
+mroas_df <- bind_rows(mroas_list)
+mroas_df
+
+```
+
