@@ -43,3 +43,8 @@ streamly_mmm_project/
 │   ├── generate_mmm_data.R   # creates the dataset
 │   └── mmm_model.R           # fits the MMM and analyzes results
 └── README.md
+
+log(subs_new) ~ meta_sat + search_sat + youtube_sat +
+                display_sat + email_sat +
+                seasonality_index + competitor_index + promo_flag
+
